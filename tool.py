@@ -1,8 +1,57 @@
+# usage: python tool.py [kernel-subdirectory]
+# example: python tool.py fs
+
 import os
 import sys
 
 total_pp_data_path = "total-pp.txt"
 pp_files = dict()
+blacklist = dict()
+
+# decide if we are entering the middle of one statement
+def is_line_incomplete(line):
+  if ((";" not in line) and ("{" not in line) and ("}" not in line) and (line != "\n")):
+    if (line.count("(") != line.count(")")):
+      return True
+    elif (("if (" in line) and (line.count("(") > line.count(")"))):  
+      return True
+    elif (("for (" in line) and (line.count("(") > line.count(")"))):
+      return True
+    elif ("?" in line): 
+      return True
+    elif (("if (" not in line) and ("for (" not in line)):
+      return True
+    else:
+      return False
+  else: 
+    if ((";" in line) and ("for (" in line) and (line.count("(") > line.count(")"))):
+      return True
+    else:
+      return False
+
+def generate_blacklist():
+  blacklist_lines_01 = set()
+  line_number = 153
+  blacklist_lines_01.add(line_number)
+  blacklist["fs/open.c"] = blacklist_lines_01
+  blacklist_lines_02 = set()
+  line_number = 125
+  blacklist_lines_02.add(line_number)
+  blacklist["fs/readdir.c"] = blacklist_lines_02
+
+def is_line_in_blacklist(line_number, file_name):
+  if file_name not in blacklist:
+    return False
+  elif line_number in blacklist[file_name]: 
+    return True
+  else:
+    return False
+
+def is_in_struct(line):
+  if (("struct" in line) and ("{" in line)):
+    return True
+  else:
+    return False
 
 def generate_pp_file(kernel_sub_dir): 
   output_pp_file = kernel_sub_dir + "-pp.txt"
@@ -32,7 +81,9 @@ def process_pp_file(pp_file_name):
 
 def generate_npp_bb(kernel_sub_dir):
   total_npp_functions = 0
+  total_pp_functions = 0
   total_lines_inserted = 0
+  total_lines_in_blacklist = 0
   prefix = "SF:/home/detectivelyw/Documents/projects/tracks/linux-stable/"
   for pp_file_name in pp_files:
     file_name = pp_file_name[len(prefix):-1]
@@ -88,6 +139,7 @@ def generate_npp_bb(kernel_sub_dir):
             for test in range(int(line_func_start), int(line_func_end) + 1, 1): 
               if str(test)+"\n" in pp_files[pp_file_name]: 
                 is_pp_func = True
+                total_pp_functions += 1
                 break 
             if is_pp_func == True: 
               pp_func.add(line_func_name) 
@@ -106,12 +158,11 @@ def generate_npp_bb(kernel_sub_dir):
         line = fp.readline()
     fp.close()   
     # finally add in the first basic block for each non-popular function
-    npp_func_counter = 0
     for item in npp_func_bb: 
       npp_bb.add(npp_func_bb[item])
-      npp_func_counter += 1
       total_npp_functions += 1
-    print "non-popular functions: " + str(npp_func_counter)
+    print "non-popular functions: " + str(len(npp_func))
+    print "popular functions: " + str(len(pp_func))
 
     InputFileName = prefix + file_name
     InputFileName = InputFileName[3:]
@@ -122,21 +173,77 @@ def generate_npp_bb(kernel_sub_dir):
 
     # variable to keep track of if conditions
     single_if_else_start = 0
+    # keep track of if we are in the middle of one statement
+    middle_statement = 0
+    # mark if we are inserting a printk with "{}", but are waiting for the original multiple-line single 
+    # statement to finish, before we can wrap it up with the "}".
+    wrapup_insertion = 0
+    # mark if we are in a single-statement if branch, but the single statement itself is another
+    # single-statement if branch. We need to wrap our second "}" a bit further in this case. 
+    wrapup_ifinif = 0
+    # mark if we are entering a struct
+    in_struct = 0
+
+    generate_blacklist()
 
     with open(OutputFileName, "w+") as f:
-      f.write("#include <linux/kernel.h>\n")
-      f.write("#include <linux/linkage.h>\n")
-      f.write("asmlinkage __printf(1, 2) __cold\n")
+      # f.write("#include <linux/kernel.h>\n")
+      # f.write("#include <linux/linkage.h>\n")
+      # f.write("asmlinkage __printf(1, 2) __cold\n")
+      f.write("extern int kernel_init_done;\n")
       f.write("int printk(const char *fmt, ...);\n")
-      new_file_counter += 4
+      new_file_counter += 2
       with open(InputFileName) as fp:  
         line = fp.readline()
         while line:
-          if (str(original_file_counter) in npp_bb):
+          # check if we meet a struct
+          if is_in_struct(line):
+            in_struct = 1
+          # check if this line is in our blacklist and should not be instrumented
+          if is_line_in_blacklist(original_file_counter, file_name):
+            f.write(line)
+            new_file_counter += 1
+            original_file_counter += 1
+            total_lines_in_blacklist += 1
+            line = fp.readline()
+            continue
+
+          # check if we are currently waiting to wrap up a previous insertion with "}"
+          if wrapup_insertion == 1:
+            if ";" in line:
+              f.write(line + "}\n")
+              new_file_counter += 2
+              original_file_counter += 1
+              line = fp.readline()
+              wrapup_insertion = 0; 
+              continue
+            else: 
+              f.write(line)
+              new_file_counter += 1
+              original_file_counter += 1
+              line = fp.readline()
+              continue
+  
+          if (str(original_file_counter) in npp_bb) and (middle_statement == 0) and (in_struct != 1):
             if single_if_else_start == 1: 
               f.write("{ if (kernel_init_done) printk(\"We reached unpopular paths: %s:%i\\n\", __FILE__, __LINE__);\n")
-              f.write(line + "}\n")
-              new_file_counter += 3
+              # check if we have another single-statement if branch here
+              if ("if (" in line) and (line.count("(") == line.count(")")) and ("{" not in line):
+                wrapup_ifinif = 1
+                f.write(line)
+                new_file_counter += 2
+              elif is_line_incomplete(line): 
+                wrapup_insertion = 1
+                f.write(line)
+                new_file_counter += 2
+              else:
+                if (wrapup_ifinif == 2) and (";" in line):
+                  wrapup_ifinif = 0
+                  f.write(line + "}\n}\n")
+                  new_file_counter += 4
+                else:
+                  f.write(line + "}\n")
+                  new_file_counter += 3
             else:
               f.write("if (kernel_init_done) printk(\"We reached unpopular paths: %s:%i\\n\", __FILE__, __LINE__);\n")
               f.write(line)
@@ -146,11 +253,22 @@ def generate_npp_bb(kernel_sub_dir):
             f.write(line)
             new_file_counter += 1
 
+          # decide if we are at the beginning of a single-line if-else statement
           if ((("if (" in line) or ("else" in line)) and ("{" not in line)):
             single_if_else_start = 1
           else:
             single_if_else_start = 0
 
+          # decide if we are entering the middle of one statement
+          if is_line_incomplete(line):
+            middle_statement = 1
+          else:
+            middle_statement = 0
+
+          if (wrapup_ifinif == 1):
+            wrapup_ifinif = 2
+          if ((in_struct == 1) and ("};" in line)):
+            in_struct = 0
           line = fp.readline()
           original_file_counter += 1
       fp.close()
@@ -159,7 +277,9 @@ def generate_npp_bb(kernel_sub_dir):
     total_lines_inserted += insert_line_counter
 
   print "total non-popular functions: " + str(total_npp_functions)
+  print "total popular functions: " + str(total_pp_functions)
   print "total number of lines inserted: " + str(total_lines_inserted)
+  print "total number of lines in our blacklist: " + str(total_lines_in_blacklist)
 
 def main():
   print "Our program has started ..."
