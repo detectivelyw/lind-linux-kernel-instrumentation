@@ -38,11 +38,21 @@ def generate_blacklist():
   line_number = 125
   blacklist_lines_02.add(line_number)
   blacklist["fs/readdir.c"] = blacklist_lines_02
+  blacklist_lines_03 = set()
+  line_number = 187
+  blacklist_lines_03.add(line_number)
+  blacklist["fs/utimes.c"] = blacklist_lines_03
 
 def is_line_in_blacklist(line_number, file_name):
   if file_name not in blacklist:
     return False
   elif line_number in blacklist[file_name]: 
+    return True
+  else:
+    return False
+
+def is_syscall_define(line):
+  if ("SYSCALL_DEFINE" in line):
     return True
   else:
     return False
@@ -224,11 +234,11 @@ def generate_npp_bb(kernel_sub_dir):
               line = fp.readline()
               continue
   
-          if (str(original_file_counter) in npp_bb) and (middle_statement == 0) and (in_struct != 1):
+          if (str(original_file_counter) in npp_bb) and (middle_statement == 0) and (in_struct != 1) and (not is_syscall_define(line)):
             if single_if_else_start == 1: 
               f.write("{ if (kernel_init_done) printk(\"We reached unpopular paths: %s:%i\\n\", __FILE__, __LINE__);\n")
-              # check if we have another single-statement if branch here
-              if ("if (" in line) and (line.count("(") == line.count(")")) and ("{" not in line):
+              # check if we have another single-statement if/for branch here
+              if (("if (" in line) and (line.count("(") == line.count(")")) and ("{" not in line)) or (("for (" in line) and (line.count("(") == line.count(")")) and ("{" not in line)):
                 wrapup_ifinif = 1
                 f.write(line)
                 new_file_counter += 2
@@ -250,11 +260,16 @@ def generate_npp_bb(kernel_sub_dir):
               new_file_counter += 2
             insert_line_counter += 1
           else: 
-            f.write(line)
-            new_file_counter += 1
+            if (wrapup_ifinif == 2) and (";" in line):
+              f.write(line + "}\n")
+              wrapup_ifinif = 0
+              new_file_counter += 2
+            else:
+              f.write(line)
+              new_file_counter += 1
 
           # decide if we are at the beginning of a single-line if-else statement
-          if ((("if (" in line) or ("else" in line)) and ("{" not in line)):
+          if ((("if (" in line) or (("else" in line) and ("#" not in line) and ("/*" not in line)) or ("for (" in line)) and ("{" not in line)):
             single_if_else_start = 1
           else:
             single_if_else_start = 0
